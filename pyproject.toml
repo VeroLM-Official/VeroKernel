@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "verokernel"
+version = "1.0.0"
+description = "VeroKernel: fused Pallas TPU kernels for RWKV-7 and Transformer (flash) attention, with Rust host-side helpers."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+keywords = ["jax", "pallas", "tpu", "rwkv", "rwkv7", "attention", "flash-attention", "kernels"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+jax = ["jax>=0.11.2"]
+tpu = ["jax[tpu]>=0.4.35"]
+test = ["pytest", "jax>=0.11.2"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "verokernel._native"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

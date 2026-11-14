@@ -1,0 +1,26 @@
+[package]
+name = "verokernel-native"
+version = "1.0.0"
+edition = "2021"
+description = "Native (Rust) host-side helpers and CPU reference kernels for VeroKernel"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3", "dep:numpy"]
+extension-module = ["python", "pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["abi3-py39"], optional = true }
+numpy = { version = "0.22", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

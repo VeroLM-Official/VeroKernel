@@ -1,0 +1,174 @@
+# VeroKernel - unpack + test + build
+#
+# Put this file at  .github/workflows/build.yml  and upload the VeroKernel zip to the root of the same repository.
+# On the first push the workflow
+#   1. unpacks the zip into the repository root (a single top-level folder inside the zip is stripped) and commits the result, then deletes the zip,
+#   2. runs the Rust and Python tests,
+#   3. builds wheels (Linux, macOS, Windows) and a source distribution; on a tag (e.g. 1.0.0) it also publishes them as a GitHub Release.
+# Later pushes skip step 1 automatically (no zip in the root).
+#
+# Needs: Settings -> Actions -> General -> Workflow permissions -> "Read and write permissions".
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unpack:
+    if: github.event_name != 'pull_request' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      unpacked: ${{ steps.unpack.outputs.unpacked }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack zip(s) found in the repository root
+        id: unpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          zips=( ./*.zip )
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "No zip in the repository root - nothing to unpack."
+            echo "unpacked=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          for z in "${zips[@]}"; do
+            echo "Unpacking $z"
+            rm -rf "$tmp/x"; mkdir "$tmp/x"
+            unzip -q -o "$z" -d "$tmp/x"
+            rm -rf "$tmp/x/__MACOSX"
+            entries=( "$tmp/x"/* "$tmp/x"/.[!.]* )
+            if [ ${#entries[@]} -eq 1 ] && [ -d "${entries[0]}" ]; then src="${entries[0]}"; else src="$tmp/x"; fi
+            if [ ! -f "$src/pyproject.toml" ] || [ ! -f "$src/Cargo.toml" ]; then
+              echo "::error::$z does not contain pyproject.toml and Cargo.toml - is it the VeroKernel zip?"
+              exit 1
+            fi
+            # workflow files are never touched here (the default token may not modify them): build.yml stays exactly as you uploaded it
+            ( cd "$src" && tar cf - --exclude='./.github/workflows' . ) | tar xf -
+            rm -f "$z"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -q -m "Unpack VeroKernel source from zip"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+          echo "unpacked=true" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: unpack
+    if: ${{ !cancelled() && (needs.unpack.result == 'success' || needs.unpack.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+      - name: Project files present?
+        id: p
+        run: |
+          if [ -f Cargo.toml ] && [ -f pyproject.toml ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; echo "::notice::No VeroKernel project files in the repository yet - upload the zip to the repository root."; fi
+      - if: steps.p.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - if: steps.p.outputs.ok == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.p.outputs.ok == 'true'
+        name: Rust tests
+        run: cargo test --release
+      - if: steps.p.outputs.ok == 'true'
+        name: Build and install the wheel
+        run: |
+          pip install maturin pytest numpy jax
+          maturin build --release -i python -o dist
+          pip install --no-deps --force-reinstall dist/*.whl
+          cd /tmp && python -c "import verokernel; assert verokernel.NATIVE; print('verokernel', verokernel.__version__, 'native:', verokernel.NATIVE)"
+      - if: steps.p.outputs.ok == 'true'
+        name: Python tests
+        run: pytest tests -q
+
+  wheels:
+    needs: test
+    if: ${{ !cancelled() && needs.test.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+      - name: Project files present?
+        id: p
+        shell: bash
+        run: |
+          if [ -f Cargo.toml ] && [ -f pyproject.toml ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.p.outputs.ok == 'true'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release -o dist
+      - if: steps.p.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist
+
+  sdist:
+    needs: test
+    if: ${{ !cancelled() && needs.test.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+      - name: Project files present?
+        id: p
+        run: |
+          if [ -f Cargo.toml ] && [ -f pyproject.toml ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.p.outputs.ok == 'true'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: -o dist
+      - if: steps.p.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  release:
+    needs: [wheels, sdist]
+    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "VeroKernel $GITHUB_REF_NAME" --generate-notes
